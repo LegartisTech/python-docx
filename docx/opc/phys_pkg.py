@@ -1,14 +1,16 @@
 # encoding: utf-8
 
 """
-Provides a general interface to a *physical* OPC package, such as a zip file.
+Provides a general interface to a *physical* OPC package, such as a zip file or an xmlPackage stream.
 """
 
 from __future__ import absolute_import
 
 import os
-
 from zipfile import ZipFile, is_zipfile, ZIP_DEFLATED
+
+from docx.oxml import parse_xml
+from lxml import etree
 
 from .compat import is_string
 from .exceptions import PackageNotFoundError
@@ -30,6 +32,9 @@ class PhysPkgReader(object):
                 raise PackageNotFoundError(
                     "Package not found at '%s'" % pkg_file
                 )
+        # if *pkg_file* is bytes, treat it as a package xml
+        if isinstance(pkg_file, bytes):
+            reader_cls = _XmlPkgReader
         else:  # assume it's a stream and pass it to Zip reader to sort out
             reader_cls = _ZipPkgReader
 
@@ -40,6 +45,7 @@ class PhysPkgWriter(object):
     """
     Factory for physical package writer objects.
     """
+
     def __new__(cls, pkg_file):
         return super(PhysPkgWriter, cls).__new__(_ZipPkgWriter)
 
@@ -119,6 +125,63 @@ class _ZipPkgReader(PhysPkgReader):
         Return the `[Content_Types].xml` blob from the zip package.
         """
         return self.blob_for(CONTENT_TYPES_URI)
+
+    def rels_xml_for(self, source_uri):
+        """
+        Return rels item XML for source with *source_uri* or None if no rels
+        item is present.
+        """
+        try:
+            rels_xml = self.blob_for(source_uri.rels_uri)
+        except KeyError:
+            rels_xml = None
+        return rels_xml
+
+
+class _XmlPkgReader(PhysPkgReader):
+    """
+    Implements |PhysPkgReader| interface for a XML OPC package.
+    """
+    def __init__(self, pkg_file):
+        super(_XmlPkgReader, self).__init__()
+        self._root_element = parse_xml(pkg_file)
+        pkg_name_attr_key = f'{{{self._root_element.nsmap["pkg"]}}}name'
+        pkg_ct_attr_key = f'{{{self._root_element.nsmap["pkg"]}}}contentType'
+        xml_data_elm = f'{{{self._root_element.nsmap["pkg"]}}}xmlData'
+        xml_binary_data_elm = f'{{{self._root_element.nsmap["pkg"]}}}binaryData'
+        parts = {}
+        content_type_xml = etree.Element('Types', xmlns="http://schemas.openxmlformats.org/package/2006/content-types")
+        for e in self._root_element:
+            pkg_name_attr_value = e.get(pkg_name_attr_key)
+            etree.SubElement(content_type_xml, 'Override', PartName=pkg_name_attr_value, ContentType=e.get(pkg_ct_attr_key))
+            children = e.findall(xml_data_elm)
+            if not len(children) == 1:
+                children = e.findall(xml_binary_data_elm)
+                if not len(children) == 1:
+                    raise ValueError(f'Found {len(children)} "xmlData" children, only one expected!')
+            parts.setdefault(pkg_name_attr_value, etree.tostring(children[0]))
+        self._parts = parts
+        self._content_type_xml = etree.tostring(content_type_xml)
+
+    def blob_for(self, pack_uri):
+        """
+        Return blob corresponding to *pack_uri*. Raises |ValueError| if no
+        matching member is present in xmlPackage.
+        """
+        return self._parts[pack_uri.membername]
+
+    def close(self):
+        """
+        Nothing to close here
+        """
+        pass
+
+    @property
+    def content_types_xml(self):
+        """
+        Return the `[Content_Types].xml` blob from the zip package.
+        """
+        return self._content_type_xml
 
     def rels_xml_for(self, source_uri):
         """
