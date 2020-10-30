@@ -16,6 +16,7 @@ from .compat import is_string
 from .exceptions import PackageNotFoundError
 from .packuri import CONTENT_TYPES_URI
 
+from base64 import b64decode
 
 class PhysPkgReader(object):
     """
@@ -45,7 +46,6 @@ class PhysPkgWriter(object):
     """
     Factory for physical package writer objects.
     """
-
     def __new__(cls, pkg_file):
         return super(PhysPkgWriter, cls).__new__(_ZipPkgWriter)
 
@@ -150,16 +150,26 @@ class _XmlPkgReader(PhysPkgReader):
         xml_data_elm = f'{{{self._root_element.nsmap["pkg"]}}}xmlData'
         xml_binary_data_elm = f'{{{self._root_element.nsmap["pkg"]}}}binaryData'
         parts = {}
-        content_type_xml = etree.Element('Types', xmlns="http://schemas.openxmlformats.org/package/2006/content-types")
+        content_type_xml = etree.Element('Types', xmlns='http://schemas.openxmlformats.org/package/2006/content-types')
+        etree.SubElement(content_type_xml, 'Default', Extension='xml', ContentType='application/xml')
+        etree.SubElement(content_type_xml, 'Default', Extension='rels', ContentType='application/vnd.openxmlformats-package.relationships+xml')
+        etree.SubElement(content_type_xml, 'Default', Extension='jpeg', ContentType='image/jpeg')
         for e in self._root_element:
             pkg_name_attr_value = e.get(pkg_name_attr_key)
             etree.SubElement(content_type_xml, 'Override', PartName=pkg_name_attr_value, ContentType=e.get(pkg_ct_attr_key))
-            children = e.findall(xml_data_elm)
-            if not len(children) == 1:
-                children = e.findall(xml_binary_data_elm)
-                if not len(children) == 1:
-                    raise ValueError(f'Found {len(children)} "xmlData" children, only one expected!')
-            parts.setdefault(pkg_name_attr_value, etree.tostring(children[0]))
+            xmlDatas = e.findall(xml_data_elm)
+
+            if len(xmlDatas) == 1 and len(xmlDatas[0]) == 1:
+                parts.setdefault(pkg_name_attr_value, etree.tostring(xmlDatas[0][0]))
+            elif len(xmlDatas) == 0:
+                binaryDatas = e.findall(xml_binary_data_elm)
+                if len(binaryDatas) == 1:
+                    parts.setdefault(pkg_name_attr_value, b64decode(binaryDatas[0].text))
+                else:
+                    raise ValueError(f'Found {len(binaryDatas)} "binaryData" children or {len(binaryDatas[0])} grand children, only one each is expected!')
+            else:
+                raise ValueError(f'Found {len(xmlDatas)} "xmlData" children or {len(xmlDatas[0])} grand children, only one each is expected!')
+
         self._parts = parts
         self._content_type_xml = etree.tostring(content_type_xml)
 
@@ -168,7 +178,7 @@ class _XmlPkgReader(PhysPkgReader):
         Return blob corresponding to *pack_uri*. Raises |ValueError| if no
         matching member is present in xmlPackage.
         """
-        return self._parts[pack_uri.membername]
+        return self._parts[str(pack_uri)]
 
     def close(self):
         """
